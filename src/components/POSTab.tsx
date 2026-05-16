@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
-import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode } from 'lucide-react';
+import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer } from 'lucide-react';
 import { supabase, CartItem, Product } from '../lib/supabase';
 
 interface POSTabProps {
@@ -24,6 +24,7 @@ export default function POSTab({ isActive }: POSTabProps) {
   const [phone, setPhone] = useState('');
   const [paying, setPaying] = useState(false);
   const [successOrder, setSuccessOrder] = useState(false);
+  const [completedOrder, setCompletedOrder] = useState<{ items: CartItem[]; phone: string; total: number; date: Date } | null>(null);
 
   const total = cart.reduce((s, item) => s + item.price * item.quantity, 0);
 
@@ -189,6 +190,15 @@ export default function POSTab({ isActive }: POSTabProps) {
   async function handlePay() {
     if (!phone.trim()) return;
     setPaying(true);
+
+    // Save bill data before clearing
+    const billData = {
+      items: [...cart],
+      phone: phone.trim(),
+      total,
+      date: new Date(),
+    };
+
     const { data: order } = await supabase
       .from('orders')
       .insert({ customer_phone: phone.trim(), total })
@@ -206,6 +216,7 @@ export default function POSTab({ isActive }: POSTabProps) {
       );
     }
     setPaying(false);
+    setCompletedOrder(billData);
     setSuccessOrder(true);
     setCart([]);
     setPhone('');
@@ -214,6 +225,43 @@ export default function POSTab({ isActive }: POSTabProps) {
   function closeSuccess() {
     setSuccessOrder(false);
     setShowCheckout(false);
+    setCompletedOrder(null);
+  }
+
+  function printBill() {
+    if (!completedOrder) return;
+    const win = window.open('', '_blank');
+    if (!win) return;
+    const itemsHtml = completedOrder.items.map(i =>
+      `<tr><td style="padding:4px 0">${i.name}</td><td style="text-align:center">${i.quantity}</td><td style="text-align:right">${(i.price * i.quantity).toLocaleString('vi-VN')}₫</td></tr>`
+    ).join('');
+    win.document.write(`
+      <html><head><title>Bill</title>
+      <style>
+        body{font-family:monospace;width:300px;margin:0 auto;padding:20px;font-size:13px}
+        h2{text-align:center;margin:0 0 4px}
+        .center{text-align:center}
+        hr{border:none;border-top:1px dashed #000;margin:8px 0}
+        table{width:100%;border-collapse:collapse}
+        .total{font-size:16px;font-weight:bold}
+      </style>
+      </head><body>
+        <h2>FOSO POS</h2>
+        <p class="center" style="margin:0 0 8px;font-size:11px">${completedOrder.date.toLocaleString('vi-VN')}</p>
+        <hr/>
+        <table>
+          <tr style="font-weight:bold;border-bottom:1px solid #000"><td>Sản phẩm</td><td style="text-align:center">SL</td><td style="text-align:right">Tiền</td></tr>
+          ${itemsHtml}
+        </table>
+        <hr/>
+        <p class="total" style="text-align:right">Tổng: ${completedOrder.total.toLocaleString('vi-VN')}₫</p>
+        <hr/>
+        <p>SĐT KH: ${completedOrder.phone}</p>
+        <p class="center" style="margin-top:12px;font-size:11px">Cảm ơn quý khách!</p>
+        <script>window.onload=()=>window.print()<\/script>
+      </body></html>
+    `);
+    win.document.close();
   }
 
   return (
@@ -430,19 +478,67 @@ export default function POSTab({ isActive }: POSTabProps) {
         </div>
       )}
 
-      {/* Success Modal */}
-      {successOrder && (
+      {/* Receipt Bill Modal */}
+      {successOrder && completedOrder && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm text-center p-8">
-            <CheckCircle size={64} className="text-green-500 mx-auto mb-4" />
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Thanh toán thành công!</h3>
-            <p className="text-gray-500 text-sm mb-6">Giao dịch đã được ghi nhận.</p>
-            <button
-              onClick={closeSuccess}
-              className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold transition-colors"
-            >
-              Giao dịch mới
-            </button>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+            {/* Bill header */}
+            <div className="bg-green-50 px-6 py-4 text-center">
+              <CheckCircle size={36} className="text-green-500 mx-auto mb-2" />
+              <h3 className="text-lg font-bold text-gray-900">Thanh toán thành công!</h3>
+            </div>
+
+            {/* Receipt content */}
+            <div className="px-6 py-4">
+              <div className="border border-gray-200 rounded-xl p-4 bg-gray-50" style={{ fontFamily: 'monospace' }}>
+                <p className="text-center font-bold text-base text-gray-900 mb-1">FOSO POS</p>
+                <p className="text-center text-xs text-gray-500 mb-3">
+                  {completedOrder.date.toLocaleString('vi-VN')}
+                </p>
+                <div className="border-t border-dashed border-gray-300 my-2" />
+
+                {/* Items */}
+                <div className="space-y-1.5">
+                  {completedOrder.items.map((item, i) => (
+                    <div key={i} className="flex justify-between text-sm text-gray-700">
+                      <span className="flex-1 truncate">{item.name}</span>
+                      <span className="w-8 text-center text-gray-500">x{item.quantity}</span>
+                      <span className="w-24 text-right font-medium">{(item.price * item.quantity).toLocaleString('vi-VN')}₫</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="border-t border-dashed border-gray-300 my-2" />
+
+                {/* Total */}
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-gray-900">TỔNG CỘNG</span>
+                  <span className="text-lg font-bold text-green-600">{completedOrder.total.toLocaleString('vi-VN')}₫</span>
+                </div>
+
+                <div className="border-t border-dashed border-gray-300 my-2" />
+
+                <p className="text-xs text-gray-500">SĐT KH: {completedOrder.phone}</p>
+                <p className="text-center text-xs text-gray-400 mt-2">Cảm ơn quý khách!</p>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="px-6 pb-5 flex gap-3">
+              <button
+                onClick={printBill}
+                className="flex-1 flex items-center justify-center gap-2 border border-gray-200 text-gray-700 py-2.5 rounded-lg font-medium hover:bg-gray-50 transition-colors"
+              >
+                <Printer size={16} />
+                In bill
+              </button>
+              <button
+                onClick={closeSuccess}
+                className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-xl font-bold transition-colors"
+              >
+                Giao dịch mới
+              </button>
+            </div>
           </div>
         </div>
       )}
