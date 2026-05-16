@@ -1,0 +1,451 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { BrowserMultiFormatReader } from '@zxing/browser';
+import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode } from 'lucide-react';
+import { supabase, CartItem, Product } from '../lib/supabase';
+
+interface POSTabProps {
+  isActive: boolean;
+}
+
+export default function POSTab({ isActive }: POSTabProps) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const controlsRef = useRef<{ stop: () => void } | null>(null);
+  const lastScannedRef = useRef<string>('');
+  const scanCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true);
+
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [scanFeedback, setScanFeedback] = useState<{ code: string; found: boolean } | null>(null);
+  const [showCheckout, setShowCheckout] = useState(false);
+  const [phone, setPhone] = useState('');
+  const [paying, setPaying] = useState(false);
+  const [successOrder, setSuccessOrder] = useState(false);
+
+  const total = cart.reduce((s, item) => s + item.price * item.quantity, 0);
+
+  // Fully release camera hardware
+  const stopCamera = useCallback(() => {
+    try {
+      controlsRef.current?.stop();
+    } catch (_) { /* ignore */ }
+    controlsRef.current = null;
+
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+    } catch (_) { /* ignore */ }
+
+    try {
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+    } catch (_) { /* ignore */ }
+  }, []);
+
+  // Request camera permission via getUserMedia, then hand stream to zxing
+  const startCamera = useCallback(async () => {
+    if (!isMountedRef.current) return;
+
+    // Always fully release first
+    stopCamera();
+
+    // Small delay to let the OS release the camera hardware
+    await new Promise(r => setTimeout(r, 300));
+
+    if (!isMountedRef.current) return;
+
+    setCameraError('');
+    setCameraLoading(true);
+
+    try {
+      if (!videoRef.current) {
+        setCameraError('Lỗi: không tìm thấy element video.');
+        setCameraLoading(false);
+        return;
+      }
+
+      // Request permission & get stream directly via getUserMedia
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+        });
+      } catch (err: any) {
+        console.error('getUserMedia error:', err);
+        if (err.name === 'NotAllowedError') {
+          setCameraError('Bị từ chối quyền camera. Vui lòng cấp quyền trong cài đặt trình duyệt.');
+        } else if (err.name === 'NotFoundError') {
+          setCameraError('Không tìm thấy camera trên thiết bị này.');
+        } else if (err.name === 'NotReadableError') {
+          setCameraError('Camera đang bận. Đóng các ứng dụng khác đang dùng camera rồi bấm Thử lại.');
+        } else {
+          setCameraError(`Lỗi camera: ${err?.message || 'Không xác định'}`);
+        }
+        setCameraLoading(false);
+        return;
+      }
+
+      if (!isMountedRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        setCameraLoading(false);
+        return;
+      }
+
+      // Keep this stream and pass it directly to zxing — no second getUserMedia call
+      streamRef.current = stream;
+
+      const reader = new BrowserMultiFormatReader();
+
+      const controls = await reader.decodeFromStream(
+        stream,
+        videoRef.current,
+        async (result, err) => {
+          if (err && err.name !== 'NotFoundException') {
+            console.warn('Scanner error:', err);
+          }
+          if (!result) return;
+          const code = result.getText();
+          if (code === lastScannedRef.current) return;
+          lastScannedRef.current = code;
+
+          if (scanCooldownRef.current) clearTimeout(scanCooldownRef.current);
+          scanCooldownRef.current = setTimeout(() => { lastScannedRef.current = ''; }, 2000);
+
+          const { data } = await supabase.from('products').select('*').eq('code', code).maybeSingle();
+          if (data) {
+            addToCart(data as Product);
+            setScanFeedback({ code, found: true });
+          } else {
+            setScanFeedback({ code, found: false });
+          }
+          setTimeout(() => setScanFeedback(null), 2000);
+        }
+      );
+
+      controlsRef.current = controls;
+
+      setCameraLoading(false);
+    } catch (err: any) {
+      console.error('Camera init error:', err);
+      if (isMountedRef.current) {
+        setCameraError(`Lỗi camera: ${err?.message || 'Không thể khởi động camera'}`);
+        setCameraLoading(false);
+      }
+    }
+  }, [stopCamera]);
+
+  // Mount/unmount
+  useEffect(() => {
+    isMountedRef.current = true;
+    startCamera();
+
+    return () => {
+      isMountedRef.current = false;
+      stopCamera();
+      if (scanCooldownRef.current) clearTimeout(scanCooldownRef.current);
+    };
+  }, []);
+
+  // Stop camera when leaving POS tab, restart when coming back
+  useEffect(() => {
+    if (isActive) {
+      startCamera();
+    } else {
+      stopCamera();
+    }
+  }, [isActive, startCamera, stopCamera]);
+
+  function addToCart(product: Product) {
+    setCart(prev => {
+      const existing = prev.find(i => i.id === product.id);
+      if (existing) {
+        return prev.map(i => i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i);
+      }
+      return [{ ...product, quantity: 1 }, ...prev];
+    });
+  }
+
+  function updateQty(id: string, delta: number) {
+    setCart(prev => prev
+      .map(i => i.id === id ? { ...i, quantity: i.quantity + delta } : i)
+      .filter(i => i.quantity > 0)
+    );
+  }
+
+  function removeItem(id: string) {
+    setCart(prev => prev.filter(i => i.id !== id));
+  }
+
+  function clearCart() {
+    setCart([]);
+  }
+
+  async function handlePay() {
+    if (!phone.trim()) return;
+    setPaying(true);
+    const { data: order } = await supabase
+      .from('orders')
+      .insert({ customer_phone: phone.trim(), total })
+      .select()
+      .single();
+
+    if (order) {
+      await supabase.from('order_items').insert(
+        cart.map(item => ({
+          order_id: order.id,
+          product_id: item.id,
+          quantity: item.quantity,
+          unit_price: item.price,
+        }))
+      );
+    }
+    setPaying(false);
+    setSuccessOrder(true);
+    setCart([]);
+    setPhone('');
+  }
+
+  function closeSuccess() {
+    setSuccessOrder(false);
+    setShowCheckout(false);
+  }
+
+  return (
+    <div className="flex flex-col h-full overflow-hidden">
+      {/* Camera panel — card style */}
+      <div className="p-4 pb-2 shrink-0">
+        <div className="relative border-2 border-dashed border-gray-200 rounded-2xl overflow-hidden bg-white" style={{ height: '180px' }}>
+          {!cameraActive && !cameraLoading && !cameraError ? (
+            /* Placeholder — show QR icon + open camera button */
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <QrCode size={48} className="text-blue-400" />
+              <p className="font-bold text-gray-800 text-base">Quét Mã</p>
+              <button
+                onClick={() => { setCameraActive(true); startCamera(); }}
+                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-full font-medium text-sm transition-colors shadow-md"
+              >
+                <Camera size={16} />
+                Mở Camera
+              </button>
+            </div>
+          ) : cameraError ? (
+            /* Error state */
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <CameraOff size={40} className="text-gray-400" />
+              <p className="text-gray-500 text-center px-6 text-sm">{cameraError}</p>
+              <button
+                onClick={startCamera}
+                disabled={cameraLoading}
+                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-5 py-2 rounded-full font-medium text-sm transition-colors"
+              >
+                <RefreshCw size={14} className={cameraLoading ? 'animate-spin' : ''} />
+                {cameraLoading ? 'Đang kết nối...' : 'Thử lại'}
+              </button>
+            </div>
+          ) : cameraLoading ? (
+            /* Loading state */
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <RefreshCw size={40} className="text-blue-400 animate-spin" />
+              <p className="text-gray-500 text-sm">Đang khởi động camera...</p>
+            </div>
+          ) : null}
+
+          {/* Video feed */}
+          <video
+            ref={videoRef}
+            className="w-full h-full object-cover"
+            style={{ display: cameraActive && !cameraError && !cameraLoading ? 'block' : 'none' }}
+            autoPlay
+            playsInline
+            muted
+          />
+
+          {/* Scanner overlay — only when camera is active */}
+          {cameraActive && !cameraError && !cameraLoading && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className="relative w-40 h-28">
+                <div className="absolute top-0 left-0 w-6 h-6" style={{ borderTopWidth: 3, borderLeftWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '4px 0 0 0' }} />
+                <div className="absolute top-0 right-0 w-6 h-6" style={{ borderTopWidth: 3, borderRightWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 4px 0 0' }} />
+                <div className="absolute bottom-0 left-0 w-6 h-6" style={{ borderBottomWidth: 3, borderLeftWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 0 0 4px' }} />
+                <div className="absolute bottom-0 right-0 w-6 h-6" style={{ borderBottomWidth: 3, borderRightWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 0 4px 0' }} />
+                <div className="absolute top-1/2 left-1 right-1 h-0.5 bg-red-500 opacity-60 animate-pulse" />
+              </div>
+            </div>
+          )}
+
+          {/* Scan feedback */}
+          {scanFeedback && (
+            <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-white text-xs font-medium shadow-lg ${scanFeedback.found ? 'bg-green-500' : 'bg-red-500'}`}>
+              {scanFeedback.found ? `✓ ${scanFeedback.code}` : `✗ ${scanFeedback.code}`}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Cart panel */}
+      <div className="flex-1 bg-white flex flex-col border-t border-gray-200 min-h-0">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShoppingCart size={20} className="text-gray-700" />
+            <h3 className="font-bold text-gray-900 text-lg">Giỏ hàng</h3>
+            {cart.length > 0 && (
+              <span className="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full font-medium">
+                {cart.reduce((s, i) => s + i.quantity, 0)}
+              </span>
+            )}
+          </div>
+          {cart.length > 0 && (
+            <button
+              onClick={clearCart}
+              className="text-xs text-red-500 hover:text-red-700 font-medium transition-colors"
+            >
+              Xoá tất cả
+            </button>
+          )}
+        </div>
+
+        {/* Cart items */}
+        <div className="flex-1 overflow-y-auto">
+          {cart.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+              <ShoppingCart size={48} strokeWidth={1.5} />
+              <p className="text-sm">Quét mã vạch để thêm sản phẩm</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-50">
+              {cart.map(item => (
+                <div key={item.id} className="px-5 py-3 flex items-center gap-3 hover:bg-gray-50 transition-colors">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-gray-900 text-sm truncate">{item.name}</p>
+                    <p className="text-xs text-gray-500 mt-0.5 font-mono">{item.code}</p>
+                    <p className="text-blue-600 font-semibold text-sm mt-0.5">
+                      {(item.price * item.quantity).toLocaleString('vi-VN')} ₫
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => updateQty(item.id, -1)}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors"
+                    >
+                      <Minus size={12} />
+                    </button>
+                    <span className="w-8 text-center font-bold text-gray-900 text-sm">{item.quantity}</span>
+                    <button
+                      onClick={() => updateQty(item.id, 1)}
+                      className="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => removeItem(item.id)}
+                    className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors ml-1"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="border-t border-gray-100 p-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="text-gray-600 font-medium">Tổng cộng</span>
+            <span className="text-2xl font-bold text-gray-900">{total.toLocaleString('vi-VN')} ₫</span>
+          </div>
+          <button
+            disabled={cart.length === 0}
+            onClick={() => setShowCheckout(true)}
+            className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400 text-white py-3.5 rounded-xl font-bold text-base transition-colors"
+          >
+            Thanh toán
+          </button>
+        </div>
+      </div>
+
+      {/* Checkout Modal */}
+      {showCheckout && !successOrder && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-bold text-gray-900">Xác nhận thanh toán</h3>
+              <button onClick={() => setShowCheckout(false)} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
+                <X size={18} className="text-gray-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              {/* Order summary */}
+              <div className="bg-gray-50 rounded-xl p-4 space-y-2 max-h-48 overflow-y-auto">
+                {cart.map(item => (
+                  <div key={item.id} className="flex justify-between text-sm">
+                    <span className="text-gray-700">{item.name} x{item.quantity}</span>
+                    <span className="font-medium text-gray-900">{(item.price * item.quantity).toLocaleString('vi-VN')} ₫</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-between items-center py-2 border-t border-gray-200">
+                <span className="font-bold text-gray-900">Tổng</span>
+                <span className="text-xl font-bold text-green-600">{total.toLocaleString('vi-VN')} ₫</span>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-gray-700 block mb-1.5 flex items-center gap-1.5">
+                  <Phone size={14} />
+                  Số điện thoại khách hàng
+                </label>
+                <input
+                  type="tel"
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                  placeholder="Nhập số điện thoại"
+                  value={phone}
+                  onChange={e => setPhone(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="px-6 pb-6 flex gap-3">
+              <button
+                onClick={() => setShowCheckout(false)}
+                className="flex-1 border border-gray-200 text-gray-700 px-4 py-2.5 rounded-lg font-medium hover:bg-gray-50 transition-colors"
+              >
+                Huỷ
+              </button>
+              <button
+                onClick={handlePay}
+                disabled={paying || !phone.trim()}
+                className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white px-4 py-2.5 rounded-lg font-bold transition-colors"
+              >
+                {paying ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : null}
+                Tính tiền
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Modal */}
+      {successOrder && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm text-center p-8">
+            <CheckCircle size={64} className="text-green-500 mx-auto mb-4" />
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Thanh toán thành công!</h3>
+            <p className="text-gray-500 text-sm mb-6">Giao dịch đã được ghi nhận.</p>
+            <button
+              onClick={closeSuccess}
+              className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold transition-colors"
+            >
+              Giao dịch mới
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
