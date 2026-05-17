@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
-import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer, Clock, Loader2 } from 'lucide-react';
+import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer, Clock, Loader2, User } from 'lucide-react';
 import { supabase, CartItem, Product } from '../lib/supabase';
 
 interface POSTabProps {
@@ -22,11 +22,14 @@ export default function POSTab({ isActive }: POSTabProps) {
   const [scanFeedback, setScanFeedback] = useState<{ code: string; found: boolean } | null>(null);
   const [showCheckout, setShowCheckout] = useState(false);
   const [phone, setPhone] = useState('');
+  const [customerName, setCustomerName] = useState('');
+  const [foundCustomer, setFoundCustomer] = useState<string | null>(null);
+  const [lookingUpPhone, setLookingUpPhone] = useState(false);
   const [paying, setPaying] = useState(false);
   const [showQRPayment, setShowQRPayment] = useState(false);
   const [qrCountdown, setQrCountdown] = useState(4);
   const [successOrder, setSuccessOrder] = useState(false);
-  const [completedOrder, setCompletedOrder] = useState<{ items: CartItem[]; phone: string; total: number; date: Date } | null>(null);
+  const [completedOrder, setCompletedOrder] = useState<{ items: CartItem[]; phone: string; customerName: string; total: number; date: Date } | null>(null);
 
   const total = cart.reduce((s, item) => s + item.price * item.quantity, 0);
 
@@ -164,6 +167,39 @@ export default function POSTab({ isActive }: POSTabProps) {
     }
   }, [isActive, startCamera, stopCamera]);
 
+  // Phone lookup from localStorage
+  useEffect(() => {
+    const trimmed = phone.trim();
+    if (trimmed.length < 9) {
+      setFoundCustomer(null);
+      setCustomerName('');
+      return;
+    }
+
+    setLookingUpPhone(true);
+    // Small delay for UX feel
+    const timeout = setTimeout(() => {
+      try {
+        const stored = localStorage.getItem('pos_customers');
+        const customers: Record<string, string> = stored ? JSON.parse(stored) : {};
+        const name = customers[trimmed];
+        if (name) {
+          setFoundCustomer(name);
+          setCustomerName(name);
+        } else {
+          setFoundCustomer(null);
+          setCustomerName('');
+        }
+      } catch {
+        setFoundCustomer(null);
+      } finally {
+        setLookingUpPhone(false);
+      }
+    }, 300);
+
+    return () => { clearTimeout(timeout); setLookingUpPhone(false); };
+  }, [phone]);
+
   function addToCart(product: Product) {
     setCart(prev => {
       const existing = prev.find(i => i.id === product.id);
@@ -190,13 +226,15 @@ export default function POSTab({ isActive }: POSTabProps) {
   }
 
   async function handlePay() {
-    if (!phone.trim()) return;
+    const finalName = foundCustomer || customerName.trim();
+    if (!phone.trim() || !finalName) return;
     setPaying(true);
 
     // Save bill data before clearing
     const billData = {
       items: [...cart],
       phone: phone.trim(),
+      customerName: finalName,
       total,
       date: new Date(),
     };
@@ -204,7 +242,7 @@ export default function POSTab({ isActive }: POSTabProps) {
     // Save order to database
     const { data: order } = await supabase
       .from('orders')
-      .insert({ customer_phone: phone.trim(), total })
+      .insert({ customer_phone: phone.trim(), customer_name: finalName, total })
       .select()
       .single();
 
@@ -222,11 +260,22 @@ export default function POSTab({ isActive }: POSTabProps) {
     setPaying(false);
     setCompletedOrder(billData);
     setCart([]);
+
+    // Save customer name → phone to localStorage
+    try {
+      const stored = localStorage.getItem('pos_customers');
+      const customers: Record<string, string> = stored ? JSON.parse(stored) : {};
+      customers[phone.trim()] = finalName;
+      localStorage.setItem('pos_customers', JSON.stringify(customers));
+    } catch { /* ignore storage errors */ }
+
     setPhone('');
+    setCustomerName('');
+    setFoundCustomer(null);
 
     // Transition to QR payment screen
     setShowQRPayment(true);
-    setQrCountdown(4);
+    setQrCountdown(5);
   }
 
   // Auto-countdown for QR payment screen
@@ -282,7 +331,8 @@ export default function POSTab({ isActive }: POSTabProps) {
         <hr/>
         <p class="total" style="text-align:right">Tổng: ${completedOrder.total.toLocaleString('vi-VN')}₫</p>
         <hr/>
-        <p>SĐT KH: ${completedOrder.phone}</p>
+        <p>Khách hàng: ${completedOrder.customerName}</p>
+        <p>SĐT: ${completedOrder.phone}</p>
         <p class="center" style="margin-top:12px;font-size:11px">Cảm ơn quý khách!</p>
         <script>window.onload=()=>window.print()<\/script>
       </body></html>
@@ -451,38 +501,58 @@ export default function POSTab({ isActive }: POSTabProps) {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-              <h3 className="text-lg font-bold text-gray-900">Xác nhận thanh toán</h3>
+              <h3 className="text-lg font-bold text-gray-900">Nhập thông tin khách hàng</h3>
               <button onClick={() => setShowCheckout(false)} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
                 <X size={18} className="text-gray-500" />
               </button>
             </div>
             <div className="p-6 space-y-4">
-              {/* Order summary */}
-              <div className="bg-gray-50 rounded-xl p-4 space-y-2 max-h-48 overflow-y-auto">
-                {cart.map(item => (
-                  <div key={item.id} className="flex justify-between text-sm">
-                    <span className="text-gray-700">{item.name} x{item.quantity}</span>
-                    <span className="font-medium text-gray-900">{(item.price * item.quantity).toLocaleString('vi-VN')} ₫</span>
-                  </div>
-                ))}
-              </div>
-              <div className="flex justify-between items-center py-2 border-t border-gray-200">
-                <span className="font-bold text-gray-900">Tổng</span>
-                <span className="text-xl font-bold text-green-600">{total.toLocaleString('vi-VN')} ₫</span>
-              </div>
+              {/* Phone input */}
               <div>
                 <label className="text-sm font-medium text-gray-700 block mb-1.5 flex items-center gap-1.5">
                   <Phone size={14} />
                   Số điện thoại khách hàng
                 </label>
-                <input
-                  type="tel"
-                  className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Nhập số điện thoại"
-                  value={phone}
-                  onChange={e => setPhone(e.target.value)}
-                />
+                <div className="relative">
+                  <input
+                    type="tel"
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 pr-9"
+                    placeholder="Nhập số điện thoại"
+                    value={phone}
+                    onChange={e => setPhone(e.target.value)}
+                  />
+                  {lookingUpPhone && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                      <Loader2 size={16} className="animate-spin text-gray-400" />
+                    </div>
+                  )}
+                </div>
               </div>
+
+              {/* Customer name — found or input */}
+              {phone.trim().length >= 9 && !lookingUpPhone && (
+                <div>
+                  <label className="text-sm font-medium text-gray-700 block mb-1.5 flex items-center gap-1.5">
+                    <User size={14} />
+                    Tên khách hàng
+                  </label>
+                  {foundCustomer ? (
+                    <div className="flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2.5">
+                      <CheckCircle size={16} className="text-green-500 shrink-0" />
+                      <span className="text-sm font-medium text-green-800">{foundCustomer}</span>
+                      <span className="text-xs text-green-500 ml-auto">Khách quen</span>
+                    </div>
+                  ) : (
+                    <input
+                      type="text"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+                      placeholder="Nhập tên khách hàng"
+                      value={customerName}
+                      onChange={e => setCustomerName(e.target.value)}
+                    />
+                  )}
+                </div>
+              )}
             </div>
             <div className="px-6 pb-6 flex gap-3">
               <button
@@ -493,7 +563,7 @@ export default function POSTab({ isActive }: POSTabProps) {
               </button>
               <button
                 onClick={handlePay}
-                disabled={paying || !phone.trim()}
+                disabled={paying || !phone.trim() || (!foundCustomer && !customerName.trim())}
                 className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white px-4 py-2.5 rounded-lg font-bold transition-colors"
               >
                 {paying ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : null}
@@ -504,36 +574,65 @@ export default function POSTab({ isActive }: POSTabProps) {
         </div>
       )}
 
-      {/* QR Payment Modal */}
+      {/* QR Payment Modal — 2 column: items left, QR right */}
       {showQRPayment && completedOrder && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" style={{ animation: 'fadeInUp 0.3s ease-out' }}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" style={{ animation: 'fadeInUp 0.3s ease-out', padding: '12px 2px' }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full overflow-hidden flex flex-col" style={{ maxWidth: 460, maxHeight: '95vh' }}>
             {/* Header */}
-            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4 text-center">
-              <h3 className="text-lg font-bold text-white">Thông tin thanh toán</h3>
-              <p className="text-blue-100 text-sm mt-0.5">Quét mã QR để thanh toán</p>
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-5 py-3 flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="text-base font-bold text-white">Thông tin thanh toán</h3>
+                <p className="text-blue-200 text-xs mt-0.5">Quét mã QR để thanh toán</p>
+              </div>
+              <div className="text-right">
+                <p className="text-blue-100 text-xs">Tổng tiền</p>
+                <p className="text-xl font-bold text-white">{completedOrder.total.toLocaleString('vi-VN')}₫</p>
+              </div>
             </div>
 
-            {/* Payment info */}
-            <div className="px-6 py-5 space-y-4">
-              {/* Amount */}
-              <div className="text-center">
-                <p className="text-sm text-gray-500 mb-1">Số tiền thanh toán</p>
-                <p className="text-3xl font-bold text-gray-900">{completedOrder.total.toLocaleString('vi-VN')} <span className="text-lg">₫</span></p>
+            {/* Two-column body */}
+            <div className="flex flex-1 min-h-0">
+              {/* Left — Item list */}
+              <div className="flex-1 border-r border-gray-100 flex flex-col min-w-0">
+                <div className="px-4 py-2.5 border-b border-gray-100 bg-gray-50">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Danh sách mặt hàng</p>
+                </div>
+                <div className="flex-1 overflow-y-auto px-4 py-2">
+                  {completedOrder.items.map((item, i) => (
+                    <div key={i} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+                      <div className="flex-1 min-w-0 mr-2">
+                        <p className="text-sm font-medium text-gray-800 truncate">{item.name}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">{item.price.toLocaleString('vi-VN')}₫ × {item.quantity}</p>
+                      </div>
+                      <p className="text-sm font-bold text-gray-900 whitespace-nowrap">{(item.price * item.quantity).toLocaleString('vi-VN')}₫</p>
+                    </div>
+                  ))}
+                </div>
+                {/* Customer info footer */}
+                <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <User size={14} className="text-gray-400 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-gray-800 truncate">{completedOrder.customerName}</p>
+                      <p className="text-xs text-gray-400">{completedOrder.phone}</p>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              {/* QR Code */}
-              <div className="flex flex-col items-center">
-                <div className="relative bg-white border-2 border-gray-100 rounded-2xl p-3 shadow-sm">
+              {/* Right — QR code */}
+              <div className="flex flex-col items-center justify-center px-5 py-4" style={{ width: 200 }}>
+                {/* QR Code */}
+                <div className="relative bg-white border-2 border-gray-100 rounded-xl p-2 shadow-sm">
                   <img
-                    src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(`FOSO-PAY|${completedOrder.total}|${completedOrder.phone}|${Date.now()}`)}&color=1e40af`}
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(`FOSO-PAY|${completedOrder.total}|${completedOrder.phone}|${Date.now()}`)}&color=1e40af`}
                     alt="QR thanh toán"
-                    className="w-44 h-44 rounded-lg"
+                    className="w-36 h-36 rounded"
                     style={{ imageRendering: 'pixelated' }}
                   />
                   {/* Pulsing scanner line */}
                   <div
-                    className="absolute left-5 right-5 h-0.5 bg-blue-500 rounded-full"
+                    className="absolute left-4 right-4 h-0.5 bg-blue-500 rounded-full"
                     style={{
                       animation: 'scanLine 2s ease-in-out infinite',
                       top: '50%',
@@ -541,33 +640,28 @@ export default function POSTab({ isActive }: POSTabProps) {
                   />
                 </div>
 
-                {/* Customer info */}
-                <div className="mt-3 text-center">
-                  <p className="text-xs text-gray-400">Khách hàng</p>
-                  <p className="text-sm font-medium text-gray-700">{completedOrder.phone}</p>
-                </div>
-              </div>
+                <p className="text-xs text-gray-400 mt-2 text-center">Quét mã để thanh toán</p>
 
-              {/* Countdown timer */}
-              <div className="flex flex-col items-center gap-2">
-                <div className="relative w-12 h-12">
-                  {/* Background circle */}
-                  <svg className="w-12 h-12 -rotate-90" viewBox="0 0 48 48">
-                    <circle cx="24" cy="24" r="20" fill="none" stroke="#e5e7eb" strokeWidth="3" />
-                    <circle
-                      cx="24" cy="24" r="20" fill="none" stroke="#3b82f6" strokeWidth="3"
-                      strokeLinecap="round"
-                      strokeDasharray={`${(qrCountdown / 4) * 125.66} 125.66`}
-                      style={{ transition: 'stroke-dasharray 1s linear' }}
-                    />
-                  </svg>
-                  <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-blue-600">
-                    {qrCountdown}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 text-sm text-gray-500">
-                  <Loader2 size={14} className="animate-spin text-blue-500" />
-                  <span>Đang chờ thanh toán...</span>
+                {/* Countdown timer */}
+                <div className="flex flex-col items-center gap-1.5 mt-3">
+                  <div className="relative w-10 h-10">
+                    <svg className="w-10 h-10 -rotate-90" viewBox="0 0 48 48">
+                      <circle cx="24" cy="24" r="20" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                      <circle
+                        cx="24" cy="24" r="20" fill="none" stroke="#3b82f6" strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeDasharray={`${(qrCountdown / 5) * 125.66} 125.66`}
+                        style={{ transition: 'stroke-dasharray 1s linear' }}
+                      />
+                    </svg>
+                    <span className="absolute inset-0 flex items-center justify-center text-xs font-bold text-blue-600">
+                      {qrCountdown}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1 text-xs text-gray-400">
+                    <Loader2 size={12} className="animate-spin text-blue-500" />
+                    <span>Đang chờ...</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -627,7 +721,8 @@ export default function POSTab({ isActive }: POSTabProps) {
 
                 <div className="border-t border-dashed border-gray-300 my-2" />
 
-                <p className="text-xs text-gray-500">SĐT KH: {completedOrder.phone}</p>
+                <p className="text-xs text-gray-500">KH: {completedOrder.customerName}</p>
+                <p className="text-xs text-gray-500">SĐT: {completedOrder.phone}</p>
                 <p className="text-center text-xs text-gray-400 mt-2">Cảm ơn quý khách!</p>
               </div>
             </div>
