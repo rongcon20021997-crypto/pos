@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
-import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer } from 'lucide-react';
+import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer, Clock, Loader2 } from 'lucide-react';
 import { supabase, CartItem, Product } from '../lib/supabase';
 
 interface POSTabProps {
@@ -23,6 +23,8 @@ export default function POSTab({ isActive }: POSTabProps) {
   const [showCheckout, setShowCheckout] = useState(false);
   const [phone, setPhone] = useState('');
   const [paying, setPaying] = useState(false);
+  const [showQRPayment, setShowQRPayment] = useState(false);
+  const [qrCountdown, setQrCountdown] = useState(4);
   const [successOrder, setSuccessOrder] = useState(false);
   const [completedOrder, setCompletedOrder] = useState<{ items: CartItem[]; phone: string; total: number; date: Date } | null>(null);
 
@@ -199,6 +201,7 @@ export default function POSTab({ isActive }: POSTabProps) {
       date: new Date(),
     };
 
+    // Save order to database
     const { data: order } = await supabase
       .from('orders')
       .insert({ customer_phone: phone.trim(), total })
@@ -215,16 +218,39 @@ export default function POSTab({ isActive }: POSTabProps) {
         }))
       );
     }
+
     setPaying(false);
     setCompletedOrder(billData);
-    setSuccessOrder(true);
     setCart([]);
     setPhone('');
+
+    // Transition to QR payment screen
+    setShowQRPayment(true);
+    setQrCountdown(4);
   }
+
+  // Auto-countdown for QR payment screen
+  useEffect(() => {
+    if (!showQRPayment) return;
+
+    if (qrCountdown <= 0) {
+      // Payment "completed" — show success
+      setShowQRPayment(false);
+      setSuccessOrder(true);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setQrCountdown(prev => prev - 1);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [showQRPayment, qrCountdown]);
 
   function closeSuccess() {
     setSuccessOrder(false);
     setShowCheckout(false);
+    setShowQRPayment(false);
     setCompletedOrder(null);
   }
 
@@ -415,13 +441,13 @@ export default function POSTab({ isActive }: POSTabProps) {
             onClick={() => setShowCheckout(true)}
             className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-400 text-white py-3.5 rounded-xl font-bold text-base transition-colors"
           >
-            Thanh toán
+            Đặt hàng
           </button>
         </div>
       </div>
 
       {/* Checkout Modal */}
-      {showCheckout && !successOrder && (
+      {showCheckout && !successOrder && !showQRPayment && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
             <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
@@ -471,12 +497,95 @@ export default function POSTab({ isActive }: POSTabProps) {
                 className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 disabled:bg-green-300 text-white px-4 py-2.5 rounded-lg font-bold transition-colors"
               >
                 {paying ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : null}
-                Tính tiền
+                Tiếp tục
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* QR Payment Modal */}
+      {showQRPayment && completedOrder && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden" style={{ animation: 'fadeInUp 0.3s ease-out' }}>
+            {/* Header */}
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-6 py-4 text-center">
+              <h3 className="text-lg font-bold text-white">Thông tin thanh toán</h3>
+              <p className="text-blue-100 text-sm mt-0.5">Quét mã QR để thanh toán</p>
+            </div>
+
+            {/* Payment info */}
+            <div className="px-6 py-5 space-y-4">
+              {/* Amount */}
+              <div className="text-center">
+                <p className="text-sm text-gray-500 mb-1">Số tiền thanh toán</p>
+                <p className="text-3xl font-bold text-gray-900">{completedOrder.total.toLocaleString('vi-VN')} <span className="text-lg">₫</span></p>
+              </div>
+
+              {/* QR Code */}
+              <div className="flex flex-col items-center">
+                <div className="relative bg-white border-2 border-gray-100 rounded-2xl p-3 shadow-sm">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(`FOSO-PAY|${completedOrder.total}|${completedOrder.phone}|${Date.now()}`)}&color=1e40af`}
+                    alt="QR thanh toán"
+                    className="w-44 h-44 rounded-lg"
+                    style={{ imageRendering: 'pixelated' }}
+                  />
+                  {/* Pulsing scanner line */}
+                  <div
+                    className="absolute left-5 right-5 h-0.5 bg-blue-500 rounded-full"
+                    style={{
+                      animation: 'scanLine 2s ease-in-out infinite',
+                      top: '50%',
+                    }}
+                  />
+                </div>
+
+                {/* Customer info */}
+                <div className="mt-3 text-center">
+                  <p className="text-xs text-gray-400">Khách hàng</p>
+                  <p className="text-sm font-medium text-gray-700">{completedOrder.phone}</p>
+                </div>
+              </div>
+
+              {/* Countdown timer */}
+              <div className="flex flex-col items-center gap-2">
+                <div className="relative w-12 h-12">
+                  {/* Background circle */}
+                  <svg className="w-12 h-12 -rotate-90" viewBox="0 0 48 48">
+                    <circle cx="24" cy="24" r="20" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                    <circle
+                      cx="24" cy="24" r="20" fill="none" stroke="#3b82f6" strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeDasharray={`${(qrCountdown / 4) * 125.66} 125.66`}
+                      style={{ transition: 'stroke-dasharray 1s linear' }}
+                    />
+                  </svg>
+                  <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-blue-600">
+                    {qrCountdown}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                  <Loader2 size={14} className="animate-spin text-blue-500" />
+                  <span>Đang chờ thanh toán...</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CSS animation keyframes */}
+      <style>{`
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes scanLine {
+          0%, 100% { top: 20%; opacity: 0.4; }
+          50% { top: 75%; opacity: 0.8; }
+        }
+      `}</style>
 
       {/* Receipt Bill Modal */}
       {successOrder && completedOrder && (
@@ -536,7 +645,7 @@ export default function POSTab({ isActive }: POSTabProps) {
                 onClick={closeSuccess}
                 className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2.5 rounded-xl font-bold transition-colors"
               >
-                Giao dịch mới
+                Kết thúc
               </button>
             </div>
           </div>
