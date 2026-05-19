@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader } from '@zxing/browser';
-import { Trash2, Plus, Minus, ShoppingCart, CameraOff, Phone, X, CheckCircle, RefreshCw, Camera, QrCode, Printer, Clock, Loader2, User } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Trash2, Plus, Minus, ShoppingCart, Phone, X, CheckCircle, QrCode, Printer, Loader2, User, Search } from 'lucide-react';
 import { supabase, CartItem, Product } from '../lib/supabase';
 
 interface POSTabProps {
@@ -8,16 +7,6 @@ interface POSTabProps {
 }
 
 export default function POSTab({ isActive }: POSTabProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const controlsRef = useRef<{ stop: () => void } | null>(null);
-  const lastScannedRef = useRef<string>('');
-  const scanCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isMountedRef = useRef(true);
-
-  const [cameraActive, setCameraActive] = useState(false);
-  const [cameraError, setCameraError] = useState('');
-  const [cameraLoading, setCameraLoading] = useState(false);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [scanFeedback, setScanFeedback] = useState<{ code: string; found: boolean } | null>(null);
   const [showCheckout, setShowCheckout] = useState(false);
@@ -30,142 +19,54 @@ export default function POSTab({ isActive }: POSTabProps) {
   const [qrCountdown, setQrCountdown] = useState(4);
   const [successOrder, setSuccessOrder] = useState(false);
   const [completedOrder, setCompletedOrder] = useState<{ items: CartItem[]; phone: string; customerName: string; total: number; date: Date } | null>(null);
+  const [barcodeInput, setBarcodeInput] = useState('');
+  
+  const barcodeInputRef = useRef<HTMLInputElement>(null);
 
   const total = cart.reduce((s, item) => s + item.price * item.quantity, 0);
 
-  // Fully release camera hardware
-  const stopCamera = useCallback(() => {
-    try {
-      controlsRef.current?.stop();
-    } catch (_) { /* ignore */ }
-    controlsRef.current = null;
-
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-      }
-    } catch (_) { /* ignore */ }
-
-    try {
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-    } catch (_) { /* ignore */ }
-  }, []);
-
-  // Request camera permission via getUserMedia, then hand stream to zxing
-  const startCamera = useCallback(async () => {
-    if (!isMountedRef.current) return;
-
-    // Always fully release first
-    stopCamera();
-
-    // Small delay to let the OS release the camera hardware
-    await new Promise(r => setTimeout(r, 300));
-
-    if (!isMountedRef.current) return;
-
-    setCameraError('');
-    setCameraLoading(true);
-
-    try {
-      if (!videoRef.current) {
-        setCameraError('Lỗi: không tìm thấy element video.');
-        setCameraLoading(false);
-        return;
-      }
-
-      // Request permission & get stream directly via getUserMedia
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
-        });
-      } catch (err: any) {
-        console.error('getUserMedia error:', err);
-        if (err.name === 'NotAllowedError') {
-          setCameraError('Bị từ chối quyền camera. Vui lòng cấp quyền trong cài đặt trình duyệt.');
-        } else if (err.name === 'NotFoundError') {
-          setCameraError('Không tìm thấy camera trên thiết bị này.');
-        } else if (err.name === 'NotReadableError') {
-          setCameraError('Camera đang bận. Đóng các ứng dụng khác đang dùng camera rồi bấm Thử lại.');
-        } else {
-          setCameraError(`Lỗi camera: ${err?.message || 'Không xác định'}`);
-        }
-        setCameraLoading(false);
-        return;
-      }
-
-      if (!isMountedRef.current) {
-        stream.getTracks().forEach(t => t.stop());
-        setCameraLoading(false);
-        return;
-      }
-
-      // Keep this stream and pass it directly to zxing — no second getUserMedia call
-      streamRef.current = stream;
-
-      const reader = new BrowserMultiFormatReader();
-
-      const controls = await reader.decodeFromStream(
-        stream,
-        videoRef.current,
-        async (result, err) => {
-          if (err && err.name !== 'NotFoundException') {
-            console.warn('Scanner error:', err);
-          }
-          if (!result) return;
-          const code = result.getText();
-          if (code === lastScannedRef.current) return;
-          lastScannedRef.current = code;
-
-          if (scanCooldownRef.current) clearTimeout(scanCooldownRef.current);
-          scanCooldownRef.current = setTimeout(() => { lastScannedRef.current = ''; }, 2000);
-
-          const { data } = await supabase.from('products').select('*').eq('code', code).maybeSingle();
-          if (data) {
-            addToCart(data as Product);
-            setScanFeedback({ code, found: true });
-          } else {
-            setScanFeedback({ code, found: false });
-          }
-          setTimeout(() => setScanFeedback(null), 2000);
-        }
-      );
-
-      controlsRef.current = controls;
-
-      setCameraLoading(false);
-    } catch (err: any) {
-      console.error('Camera init error:', err);
-      if (isMountedRef.current) {
-        setCameraError(`Lỗi camera: ${err?.message || 'Không thể khởi động camera'}`);
-        setCameraLoading(false);
-      }
-    }
-  }, [stopCamera]);
-
-  // Mount/unmount
+  // Global listener to focus the hidden input when typing (e.g. from a barcode scanner)
   useEffect(() => {
-    isMountedRef.current = true;
-    startCamera();
+    if (isActive && barcodeInputRef.current && !showCheckout && !showQRPayment && !successOrder) {
+      barcodeInputRef.current.focus();
+    }
 
-    return () => {
-      isMountedRef.current = false;
-      stopCamera();
-      if (scanCooldownRef.current) clearTimeout(scanCooldownRef.current);
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (!isActive || showCheckout || showQRPayment || successOrder) return;
+      
+      const activeTag = document.activeElement?.tagName.toLowerCase();
+      if (activeTag === 'input' || activeTag === 'textarea') {
+        if (document.activeElement !== barcodeInputRef.current) {
+          return; // Let user type in other fields (like phone number)
+        }
+      }
+
+      // If a standard character is typed, focus our hidden barcode input
+      if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        barcodeInputRef.current?.focus();
+      }
     };
-  }, []);
 
-  // Stop camera when leaving POS tab, restart when coming back
-  useEffect(() => {
-    if (isActive) {
-      startCamera();
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [isActive, showCheckout, showQRPayment, successOrder]);
+
+  const handleBarcodeSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const code = barcodeInput.trim();
+    if (!code) return;
+
+    const { data } = await supabase.from('products').select('*').eq('code', code).maybeSingle();
+    if (data) {
+      addToCart(data as Product);
+      setScanFeedback({ code, found: true });
     } else {
-      stopCamera();
+      setScanFeedback({ code, found: false });
     }
-  }, [isActive, startCamera, stopCamera]);
+    setTimeout(() => setScanFeedback(null), 2000);
+    setBarcodeInput('');
+    barcodeInputRef.current?.focus();
+  };
 
   // Phone lookup from localStorage
   useEffect(() => {
@@ -301,6 +202,7 @@ export default function POSTab({ isActive }: POSTabProps) {
     setShowCheckout(false);
     setShowQRPayment(false);
     setCompletedOrder(null);
+    barcodeInputRef.current?.focus();
   }
 
   function printBill() {
@@ -342,75 +244,25 @@ export default function POSTab({ isActive }: POSTabProps) {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Camera panel — card style */}
-      <div className="p-4 pb-2 shrink-0">
-        <div className="relative border-2 border-dashed border-gray-200 rounded-2xl overflow-hidden bg-white" style={{ height: '180px' }}>
-          {!cameraActive && !cameraLoading && !cameraError ? (
-            /* Placeholder — show QR icon + open camera button */
-            <div className="flex flex-col items-center justify-center h-full gap-3">
-              <QrCode size={48} className="text-blue-400" />
-              <p className="font-bold text-gray-800 text-base">Quét Mã</p>
-              <button
-                onClick={() => { setCameraActive(true); startCamera(); }}
-                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-5 py-2 rounded-full font-medium text-sm transition-colors shadow-md"
-              >
-                <Camera size={16} />
-                Mở Camera
-              </button>
-            </div>
-          ) : cameraError ? (
-            /* Error state */
-            <div className="flex flex-col items-center justify-center h-full gap-3">
-              <CameraOff size={40} className="text-gray-400" />
-              <p className="text-gray-500 text-center px-6 text-sm">{cameraError}</p>
-              <button
-                onClick={startCamera}
-                disabled={cameraLoading}
-                className="flex items-center gap-2 bg-blue-500 hover:bg-blue-600 disabled:bg-blue-300 text-white px-5 py-2 rounded-full font-medium text-sm transition-colors"
-              >
-                <RefreshCw size={14} className={cameraLoading ? 'animate-spin' : ''} />
-                {cameraLoading ? 'Đang kết nối...' : 'Thử lại'}
-              </button>
-            </div>
-          ) : cameraLoading ? (
-            /* Loading state */
-            <div className="flex flex-col items-center justify-center h-full gap-3">
-              <RefreshCw size={40} className="text-blue-400 animate-spin" />
-              <p className="text-gray-500 text-sm">Đang khởi động camera...</p>
-            </div>
-          ) : null}
+      {/* Hidden barcode scanner input */}
+      <form onSubmit={handleBarcodeSubmit} className="absolute opacity-0 pointer-events-none w-0 h-0 overflow-hidden" aria-hidden="true">
+        <input
+          ref={barcodeInputRef}
+          type="text"
+          value={barcodeInput}
+          onChange={(e) => setBarcodeInput(e.target.value)}
+          autoFocus
+          autoComplete="off"
+        />
+        <button type="submit" tabIndex={-1}>Submit</button>
+      </form>
 
-          {/* Video feed */}
-          <video
-            ref={videoRef}
-            className="w-full h-full object-cover"
-            style={{ display: cameraActive && !cameraError && !cameraLoading ? 'block' : 'none' }}
-            autoPlay
-            playsInline
-            muted
-          />
-
-          {/* Scanner overlay — only when camera is active */}
-          {cameraActive && !cameraError && !cameraLoading && (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="relative w-40 h-28">
-                <div className="absolute top-0 left-0 w-6 h-6" style={{ borderTopWidth: 3, borderLeftWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '4px 0 0 0' }} />
-                <div className="absolute top-0 right-0 w-6 h-6" style={{ borderTopWidth: 3, borderRightWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 4px 0 0' }} />
-                <div className="absolute bottom-0 left-0 w-6 h-6" style={{ borderBottomWidth: 3, borderLeftWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 0 0 4px' }} />
-                <div className="absolute bottom-0 right-0 w-6 h-6" style={{ borderBottomWidth: 3, borderRightWidth: 3, borderColor: '#3b82f6', borderStyle: 'solid', borderRadius: '0 0 4px 0' }} />
-                <div className="absolute top-1/2 left-1 right-1 h-0.5 bg-red-500 opacity-60 animate-pulse" />
-              </div>
-            </div>
-          )}
-
-          {/* Scan feedback */}
-          {scanFeedback && (
-            <div className={`absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-lg text-white text-xs font-medium shadow-lg ${scanFeedback.found ? 'bg-green-500' : 'bg-red-500'}`}>
-              {scanFeedback.found ? `✓ ${scanFeedback.code}` : `✗ ${scanFeedback.code}`}
-            </div>
-          )}
+      {/* Global Scan feedback toast */}
+      {scanFeedback && (
+        <div className={`absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-white text-sm font-medium shadow-lg z-50 ${scanFeedback.found ? 'bg-green-500' : 'bg-red-500'}`}>
+          {scanFeedback.found ? `✓ Đã thêm mã ${scanFeedback.code}` : `✗ Không tìm thấy mã ${scanFeedback.code}`}
         </div>
-      </div>
+      )}
 
       {/* Cart panel */}
       <div className="flex-1 bg-white flex flex-col border-t border-gray-200 min-h-0">
